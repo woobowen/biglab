@@ -6,15 +6,17 @@
 /* pmem.c: 物理内存管理逻辑 */
 
 void pmem_init(void);
-void *pmem_alloc();
-void pmem_free(void *pa);
+void *pmem_alloc(bool in_kernel);
+void pmem_free(uint64 page, bool in_kernel);
 
 
 /* kvm.c: 内核态虚拟内存管理 + 页表通用函数 */
 
-pte_t *walk_pte(pgtbl_t pgtbl, uint64 va);
-int uvm_map_pages(pgtbl_t pgtbl, uint64 va, uint64 len, int perm);
-void uvm_unmap_pages(pgtbl_t pgtbl, uint64 va, uint64 len);
+/* kvm.c: 内核态虚拟内存管理 + 页表通用函数 */
+
+pte_t *vm_getpte(pgtbl_t pgtbl, uint64 va, bool alloc);
+void vm_mappages(pgtbl_t pgtbl, uint64 va, uint64 pa, uint64 len, int perm);
+void vm_unmappages(pgtbl_t pgtbl, uint64 va, uint64 len, bool freeit);
 void vm_print(pgtbl_t pgtbl);
 void kvm_init();
 void kvm_inithart();
@@ -24,9 +26,10 @@ void kvm_map_trampoline(pgtbl_t pgtbl);
 /* uvm.c: 用户态虚拟内存管理 */
 
 // --- Lab 5 的函数原型 ---
-int uvm_copyin(pagetable_t pgtbl, char *dst, uint64 src, uint64 len);
-int uvm_copyout(pagetable_t pgtbl, uint64 dst, char *src, uint64 len);
-int uvm_copyin_str(pagetable_t pgtbl, char *dst, uint64 src, uint64 max_len);
+// --- Lab 5 的函数原型 ---
+int uvm_copyin(pgtbl_t pgtbl, char *dst, uint64 src, uint64 len);
+int uvm_copyout(pgtbl_t pgtbl, uint64 dst, char *src, uint64 len);
+int uvm_copyin_str(pgtbl_t pgtbl, char *dst, uint64 src, uint64 max_len);
 void uvm_show_mmaplist(mmap_region_t *mmap);
 uint64 uvm_mmap(proc_t *p, uint64 begin, uint64 len, int prot);
 int uvm_munmap(proc_t *p, uint64 begin, uint64 len);

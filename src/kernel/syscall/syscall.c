@@ -75,5 +75,5 @@ void arg_str(int n, char *buf, int maxlen)
     uint64 addr;
     arg_uint64(n, &addr);
 
-    uvm_copyin_str(p->pgtbl, (uint64)buf, addr, maxlen);
+    uvm_copyin_str(p->pgtbl, buf, addr, maxlen);
 }

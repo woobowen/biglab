@@ -1,17 +1,4 @@
-#include "lib/type.h"
-#include "lib/mod.h"
-#include "lib/method.h"
-
-#include "proc/type.h"
-#include "proc/method.h"
-
-#include "mem/type.h"
-#include "mem/method.h"
-
-#include "syscall/type.h"
-#include "syscall/method.h"
-
-#include "lib/print.h"
+#include "mod.h"
 
 
 /*
@@ -30,25 +17,25 @@
  * d. 失败, kill_proc()
  * 3. 其他: 暂不处理, kill_proc()
  */
-
+extern char kernel_vector[];
 void trap_user_handler()
 {
     proc_t *p = myproc();
     uint64 scause = r_scause();
     uint64 sepc = r_sepc();
     uint64 stval = r_stval();
-
-    w_stvec((uint64)trap_kernel_vector);
+    p->tf->user_to_kern_epc = sepc; // 保存 sepc 到 trapframe
+    w_stvec((uint64)kernel_vector);
     
     if (scause == 8) {
         // System call from User-mode
         
         // sepc + 4, 否则会陷入无限循环
-        p->tf->sepc += 4;
+        p->tf->user_to_kern_epc += 4;
         
         // 调用系统调用处理函数
         // a0 寄存器(tf->a0)用于存放返回值
-        p->tf->a0 = syscall();
+        syscall();
         
     } else if (scause == 13 || scause == 15) {
         // Page Fault (Load or Store)

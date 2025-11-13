@@ -1,6 +1,5 @@
 #include "lib/type.h"
 #include "lib/method.h"
-#include "lib/print.h"
 #include "syscall/type.h"
 #include "syscall/method.h"
 #include "proc/type.h"

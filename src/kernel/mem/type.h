@@ -38,7 +38,7 @@ extern char ALLOC_END[];
 /*---------------------------------- 关于虚拟内存 ---------------------------------------*/
 
 // --- 修复: 添加缺失的宏定义 ---
-#define PGROUNDUP(sz)  ((sz)+PGSIZE-1) & ~(PGSIZE-1)
+#define PGROUNDUP(sz)  ( ((sz)+PGSIZE-1) & ~(PGSIZE-1) )
 #define PGROUNDDOWN(a) (a) & ~(PGSIZE-1)
 // ----------------------------
 

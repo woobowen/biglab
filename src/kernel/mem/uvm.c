@@ -2,8 +2,8 @@
 #include "lib/mod.h"
 #include "lib/method.h"  // <--- 包含 printf, memset 等
 
-#include "mem/type.h"    // <--- 包含 pagetable_t, UHEAP_START, PTE2PA, PGROUNDUP 等
-#include "mem/method.h"  // <--- 包含 pmem_alloc, walk_pte, uvm_map_pages, mmap_region_alloc 等
+#include "mem/type.h"    // <--- 包含 pgtbl_t, UHEAP_START, PTE_TO_PA, PGROUNDUP 等
+#include "mem/method.h"  // <--- 包含 pmem_alloc, vm_getpte, vm_mappages, mmap_region_alloc 等
 
 #include "proc/type.h"   // <--- 包含 proc_t
 #include "proc/method.h" // <--- 包含 myproc
@@ -13,7 +13,7 @@
  * ---------------- uvm_copyin / uvm_copyout ----------------
  */
 
-int uvm_copyin(pagetable_t pgtbl, char *dst, uint64 src, uint64 len)
+int uvm_copyin(pgtbl_t pgtbl, char *dst, uint64 src, uint64 len)
 {
     uint64 n, va, pa;
     pte_t *pte;
@@ -23,17 +23,17 @@ int uvm_copyin(pagetable_t pgtbl, char *dst, uint64 src, uint64 len)
         uint64 copy_len = (n < (PGSIZE - offset)) ? n : (PGSIZE - offset);
 
         va = src & (~(PGSIZE - 1));
-        pte = walk_pte(pgtbl, va); // <--- 依赖 mem/method.h
+        pte = vm_getpte(pgtbl, va, false); // <--- 修复: walk_pte -> vm_getpte
         if (pte == 0 || (*pte & PTE_V) == 0 || (*pte & PTE_U) == 0)
             return -1; // 页不存在或无用户权限
         
-        pa = PTE2PA(*pte); // <--- 依赖 mem/type.h
+        pa = PTE_TO_PA(*pte); // <--- 修复: PTE2PA -> PTE_TO_PA
         memmove(dst, (void *)(pa + offset), copy_len);
     }
     return 0;
 }
 
-int uvm_copyout(pagetable_t pgtbl, uint64 dst, char *src, uint64 len)
+int uvm_copyout(pgtbl_t pgtbl, uint64 dst, char *src, uint64 len)
 {
     uint64 n, va, pa;
     pte_t *pte;
@@ -43,17 +43,17 @@ int uvm_copyout(pagetable_t pgtbl, uint64 dst, char *src, uint64 len)
         uint64 copy_len = (n < (PGSIZE - offset)) ? n : (PGSIZE - offset);
         
         va = dst & (~(PGSIZE - 1));
-        pte = walk_pte(pgtbl, va);
+        pte = vm_getpte(pgtbl, va, false); // <--- 修复: walk_pte -> vm_getpte
         if (pte == 0 || (*pte & PTE_V) == 0 || (*pte & PTE_U) == 0 || (*pte & PTE_W) == 0)
             return -1; // 页不存在, 或无用户/写权限
         
-        pa = PTE2PA(*pte);
+        pa = PTE_TO_PA(*pte); // <--- 修复: PTE2PA -> PTE_TO_PA
         memmove((void *)(pa + offset), src, copy_len);
     }
     return 0;
 }
 
-int uvm_copyin_str(pagetable_t pgtbl, char *dst, uint64 src, uint64 max_len)
+int uvm_copyin_str(pgtbl_t pgtbl, char *dst, uint64 src, uint64 max_len)
 {
     uint64 va, pa, offset;
     int count = 0;
@@ -63,11 +63,11 @@ int uvm_copyin_str(pagetable_t pgtbl, char *dst, uint64 src, uint64 max_len)
         offset = src & (PGSIZE - 1);
         va = src & (~(PGSIZE - 1));
         
-        pte = walk_pte(pgtbl, va);
+        pte = vm_getpte(pgtbl, va, false); // <--- 修复: walk_pte -> vm_getpte
         if (pte == 0 || (*pte & PTE_V) == 0 || (*pte & PTE_U) == 0)
             return -1; // 页不存在或无用户权限
         
-        pa = PTE2PA(*pte);
+        pa = PTE_TO_PA(*pte); // <--- 修复: PTE2PA -> PTE_TO_PA
         *dst = *(char *)(pa + offset);
         if (*dst == '\0') {
             return count + 1;
@@ -96,10 +96,19 @@ int uvm_heap_grow(proc_t *p, uint64 new_top)
         return -1; // 超过 mmap 区域
     }
 
-    if (uvm_map_pages(p->pgtbl, old_top_pg, new_top_pg - old_top_pg, PTE_U | PTE_R | PTE_W) < 0) { // <--- 依赖 mem/method.h
-        // 分配失败, 需要回滚
-        uvm_unmap_pages(p->pgtbl, old_top_pg, new_top_pg - old_top_pg); // <--- 依赖 mem/method.h
-        return -1;
+    // 必须逐页分配和映射
+    uint64 va;
+    for (va = old_top_pg; va < new_top_pg; va += PGSIZE) {
+        void *pa = pmem_alloc(false); // (false) 为用户空间分配物理页
+        if (pa == 0) {
+            // 分配失败, 需要回滚
+            vm_unmappages(p->pgtbl, old_top_pg, va - old_top_pg, true); // (true) 释放刚分配的页
+            return -1;
+        }
+        
+        // --- 修复: 移除 if 检查 ---
+        // (true) 映射刚分配的页
+        vm_mappages(p->pgtbl, va, (uint64)pa, PGSIZE, PTE_U | PTE_R | PTE_W);
     }
 
     p->heap_top = new_top;
@@ -113,7 +122,7 @@ int uvm_heap_ungrow(proc_t *p, uint64 new_top)
     uint64 new_top_pg = PGROUNDUP(new_top);
 
     if (new_top_pg < old_top_pg) {
-        uvm_unmap_pages(p->pgtbl, new_top_pg, old_top_pg - new_top_pg);
+        vm_unmappages(p->pgtbl, new_top_pg, old_top_pg - new_top_pg, true); // <--- 修复: uvm_unmap_pages -> vm_unmappages
     }
 
     p->heap_top = new_top;
@@ -142,17 +151,27 @@ int uvm_ustack_grow(proc_t *p, uint64 fault_va)
         // 需要一次性扩展多页
         uint64 va;
         for (va = ustack_top - PGSIZE; va >= new_page_va; va -= PGSIZE) {
-            if (uvm_map_pages(p->pgtbl, va, PGSIZE, PTE_U | PTE_R | PTE_W) < 0) {
+            // --- 修复: uvm_map_pages -> pmem_alloc + vm_mappages ---
+            void *pa = pmem_alloc(false); // (false) 分配用户物理页
+            if (pa == 0) {
                 // 分配失败, 回滚
-                uvm_unmap_pages(p->pgtbl, va + PGSIZE, ustack_top - (va + PGSIZE));
+                vm_unmappages(p->pgtbl, va + PGSIZE, ustack_top - (va + PGSIZE), true); // (true) 释放刚分配的页
                 return -1;
             }
+            
+            // --- 修复: 移除 if 检查 ---
+            vm_mappages(p->pgtbl, va, (uint64)pa, PGSIZE, PTE_U | PTE_R | PTE_W);
         }
     } else {
          // 扩展一页
-        if (uvm_map_pages(p->pgtbl, new_page_va, PGSIZE, PTE_U | PTE_R | PTE_W) < 0) {
-            return -1;
+         // --- 修复: uvm_map_pages -> pmem_alloc + vm_mappages ---
+        void *pa = pmem_alloc(false); // (false) 分配用户物理页
+        if (pa == 0) {
+            return -1; // 失败
         }
+        
+        // --- 修复: 移除 if 检查 ---
+        vm_mappages(p->pgtbl, new_page_va, (uint64)pa, PGSIZE, PTE_U | PTE_R | PTE_W);
     }
 
     // 更新栈占用的页数
@@ -267,9 +286,17 @@ uint64 uvm_mmap(proc_t *p, uint64 begin, uint64 len, int prot)
     p->mmap = dummy_head.next; // 更新链表头
 
     // 建立页表映射
-    if (uvm_map_pages(p->pgtbl, begin, npages * PGSIZE, prot | PTE_U) < 0) {
-        uvm_munmap(p, begin, len); // 映射失败, 回滚
-        return -1;
+    // --- 修复: uvm_map_pages -> pmem_alloc + vm_mappages ---
+    uint64 va_end = begin + npages * PGSIZE;
+    for (uint64 va_current = begin; va_current < va_end; va_current += PGSIZE) {
+        void *pa = pmem_alloc(false); // (false) 为用户空间分配物理页
+        if (pa == 0) {
+            uvm_munmap(p, begin, len); // 映射失败, 回滚 (调用修复后的 munmap)
+            return -1;
+        }
+        
+        // --- 修复: 移除 if 检查 ---
+        vm_mappages(p->pgtbl, va_current, (uint64)pa, PGSIZE, prot | PTE_U);
     }
     
     // 调试性输出
@@ -316,7 +343,7 @@ int uvm_munmap(proc_t *p, uint64 begin, uint64 len)
 
         // 3. 释放区域覆盖了整个 cur 节点
         if (begin <= cur->begin && end >= cur_end) {
-            uvm_unmap_pages(p->pgtbl, cur->begin, cur->npages * PGSIZE);
+            vm_unmappages(p->pgtbl, cur->begin, cur->npages * PGSIZE, true); // <--- 修复: uvm_unmap_pages -> vm_unmappages
             pre->next = cur->next;
             mmap_region_free(cur);
             cur = pre->next;
@@ -340,7 +367,7 @@ int uvm_munmap(proc_t *p, uint64 begin, uint64 len)
             cur->next = new_node;
 
             // 解除中间区域的映射
-            uvm_unmap_pages(p->pgtbl, begin, npages * PGSIZE);
+            vm_unmappages(p->pgtbl, begin, npages * PGSIZE, true); // <--- 修复: uvm_unmap_pages -> vm_unmappages
             
             // cur 已经处理完毕, pre 和 cur 都需要后移
             pre = new_node;
@@ -351,7 +378,7 @@ int uvm_munmap(proc_t *p, uint64 begin, uint64 len)
         // 5. 释放区域覆盖了 cur 的左侧部分
         if (begin <= cur->begin && end < cur_end) {
             uint32 unmap_npages = (end - cur->begin) / PGSIZE;
-            uvm_unmap_pages(p->pgtbl, cur->begin, unmap_npages * PGSIZE);
+            vm_unmappages(p->pgtbl, cur->begin, unmap_npages * PGSIZE, true); // <--- 修复: uvm_unmap_pages -> vm_unmappages
             
             // cur 节点右移, 页数减少
             cur->begin = end;
@@ -364,7 +391,7 @@ int uvm_munmap(proc_t *p, uint64 begin, uint64 len)
         // 6. 释放区域覆盖了 cur 的右侧部分
         if (begin > cur->begin && end >= cur_end) {
             uint32 unmap_npages = (cur_end - begin) / PGSIZE;
-            uvm_unmap_pages(p->pgtbl, begin, unmap_npages * PGSIZE);
+            vm_unmappages(p->pgtbl, begin, unmap_npages * PGSIZE, true); // <--- 修复: uvm_unmap_pages -> vm_unmappages
 
             // cur 节点页数减少
             cur->npages = (begin - cur->begin) / PGSIZE;
@@ -411,7 +438,7 @@ void uvm_show_mmaplist(mmap_region_t *list)
  */
 
 // 递归释放页表
-static void pgtbl_free_recursive(pagetable_t pgtbl, int level)
+static void pgtbl_free_recursive(pgtbl_t pgtbl, int level)
 {
     if (level < 0) return;
 
@@ -419,11 +446,11 @@ static void pgtbl_free_recursive(pagetable_t pgtbl, int level)
         pte_t pte = pgtbl[i];
         if ((pte & PTE_V) && (pte & (PTE_R | PTE_W | PTE_X)) == 0) {
             // 这是一个指向下一级页表的 PTE
-            uint64 child_pa = PTE2PA(pte);
-            pgtbl_free_recursive((pagetable_t)child_pa, level - 1);
+            uint64 child_pa = PTE_TO_PA(pte); // <--- 修复: PTE2PA -> PTE_TO_PA
+            pgtbl_free_recursive((pgtbl_t)child_pa, level - 1);
         }
     }
-    pmem_free((void *)pgtbl); // 释放当前页表页
+    pmem_free((uint64)pgtbl, true); // <--- 修复: 增加 (uint64) 和 'true'
 }
 
 void uvm_destroy_pgtbl(proc_t *p)
@@ -431,7 +458,7 @@ void uvm_destroy_pgtbl(proc_t *p)
     // 1. 释放 mmap 区域的物理页和 mmap_region 节点
     mmap_region_t *cur = p->mmap;
     while (cur) {
-        uvm_unmap_pages(p->pgtbl, cur->begin, cur->npages * PGSIZE);
+        vm_unmappages(p->pgtbl, cur->begin, cur->npages * PGSIZE, true); // <--- 修复: uvm_unmap_pages -> vm_unmappages
         mmap_region_t *next = cur->next;
         mmap_region_free(cur);
         cur = next;
@@ -441,21 +468,21 @@ void uvm_destroy_pgtbl(proc_t *p)
     // 2. 释放 heap 区域的物理页
     uint64 heap_pg = PGROUNDUP(p->heap_top);
     if (heap_pg > UHEAP_START) { // <--- 依赖 mem/type.h
-        uvm_unmap_pages(p->pgtbl, UHEAP_START, heap_pg - UHEAP_START);
+        vm_unmappages(p->pgtbl, UHEAP_START, heap_pg - UHEAP_START, true); // <--- 修复: uvm_unmap_pages -> vm_unmappages
     }
     p->heap_top = UHEAP_START;
 
     // 3. 释放 ustack 区域的物理页
     uint64 ustack_bottom = VA_MAX - (p->ustack_npage + 2) * PGSIZE;
     if (p->ustack_npage > 1) {
-        uvm_unmap_pages(p->pgtbl, ustack_bottom, (p->ustack_npage - 1) * PGSIZE);
+        vm_unmappages(p->pgtbl, ustack_bottom, (p->ustack_npage - 1) * PGSIZE, true); // <--- 修复: uvm_unmap_pages -> vm_unmappages
     }
     // (保留 ustack_top 下方的一页)
-    uvm_unmap_pages(p->pgtbl, VA_MAX - 2 * PGSIZE, PGSIZE); // 释放初始栈页
+    vm_unmappages(p->pgtbl, VA_MAX - 2 * PGSIZE, PGSIZE, true); // <--- 修复: 释放初始栈页
     p->ustack_npage = 0;
 
     // 4. 释放 initcode (如果存在)
-    uvm_unmap_pages(p->pgtbl, 0, PGSIZE);
+    vm_unmappages(p->pgtbl, 0, PGSIZE, true); // <--- 修复: 假设 initcode 在 0
 
     // 5. 递归释放页表本身 (除了 trampoline)
     if (p->pgtbl) {
@@ -469,7 +496,7 @@ void uvm_destroy_pgtbl(proc_t *p)
 int uvm_copy_pgtbl(proc_t *p_old, proc_t *p_new)
 {
     // 1. 创建新页表, 映射 TRAMPOLINE
-    p_new->pgtbl = (pagetable_t)pmem_alloc(); // <--- 依赖 mem/type.h
+    p_new->pgtbl = (pgtbl_t)pmem_alloc(true); // <--- 修复: 增加 'true'
     if (p_new->pgtbl == 0) return -1;
     memset(p_new->pgtbl, 0, PGSIZE);
     kvm_map_trampoline(p_new->pgtbl); // <--- 依赖 mem/method.h
@@ -477,18 +504,25 @@ int uvm_copy_pgtbl(proc_t *p_old, proc_t *p_new)
     // 2. 复制 heap
     uint64 heap_size = p_old->heap_top - UHEAP_START;
     if (heap_size > 0) {
-        if (uvm_map_pages(p_new->pgtbl, UHEAP_START, PGROUNDUP(p_old->heap_top) - UHEAP_START, PTE_U | PTE_R | PTE_W) < 0)
-            goto fail;
+        // --- 修复: uvm_map_pages -> pmem_alloc + vm_mappages ---
+        uint64 heap_end_pg = PGROUNDUP(p_old->heap_top);
+        for (uint64 va = UHEAP_START; va < heap_end_pg; va += PGSIZE) {
+            void *pa = pmem_alloc(false);
+            if (pa == 0) goto fail;
+            
+            // --- 修复: 移除 if 检查 ---
+            vm_mappages(p_new->pgtbl, va, (uint64)pa, PGSIZE, PTE_U | PTE_R | PTE_W);
+        }
         
         // 复制 heap 内容
         if (uvm_copyin(p_old->pgtbl, (char *)p_new->pgtbl + UHEAP_START, UHEAP_START, heap_size) < 0) {
             // 简化的方法: 直接物理内存复制
             for (uint64 va = UHEAP_START; va < PGROUNDUP(p_old->heap_top); va += PGSIZE) {
-                pte_t *pte_old = walk_pte(p_old->pgtbl, va);
-                pte_t *pte_new = walk_pte(p_new->pgtbl, va);
+                pte_t *pte_old = vm_getpte(p_old->pgtbl, va, false); // <--- 修复: walk_pte -> vm_getpte
+                pte_t *pte_new = vm_getpte(p_new->pgtbl, va, true); // <--- 修复: walk_pte -> vm_getpte
                 if (pte_old && (*pte_old & PTE_V) && pte_new && (*pte_new & PTE_V)) {
-                    void *pa_old = (void *)PTE2PA(*pte_old);
-                    void *pa_new = (void *)PTE2PA(*pte_new);
+                    void *pa_old = (void *)PTE_TO_PA(*pte_old); // <--- 修复: PTE2PA -> PTE_TO_PA
+                    void *pa_new = (void *)PTE_TO_PA(*pte_new); // <--- 修复: PTE2PA -> PTE_TO_PA
                     memmove(pa_new, pa_old, PGSIZE);
                 }
             }
@@ -501,16 +535,24 @@ int uvm_copy_pgtbl(proc_t *p_old, proc_t *p_new)
     uint64 ustack_bottom_old = VA_MAX - (p_old->ustack_npage + 2) * PGSIZE;
     uint64 ustack_size = p_old->ustack_npage * PGSIZE;
     
-    if (uvm_map_pages(p_new->pgtbl, ustack_bottom_old, ustack_size, PTE_U | PTE_R | PTE_W) < 0)
-        goto fail;
+    // --- 修复: uvm_map_pages -> pmem_alloc + vm_mappages ---
+    if (ustack_size > 0) {
+        for (uint64 va = ustack_bottom_old; va < VA_MAX - 2 * PGSIZE; va += PGSIZE) {
+            void *pa = pmem_alloc(false);
+            if (pa == 0) goto fail;
+            
+            // --- 修复: 移除 if 检查 ---
+            vm_mappages(p_new->pgtbl, va, (uint64)pa, PGSIZE, PTE_U | PTE_R | PTE_W);
+        }
+    }
     
     // 复制 ustack 内容
     for (uint64 va = ustack_bottom_old; va < VA_MAX - 2 * PGSIZE; va += PGSIZE) {
-        pte_t *pte_old = walk_pte(p_old->pgtbl, va);
-        pte_t *pte_new = walk_pte(p_new->pgtbl, va);
+        pte_t *pte_old = vm_getpte(p_old->pgtbl, va, false); // <--- 修复: walk_pte -> vm_getpte
+        pte_t *pte_new = vm_getpte(p_new->pgtbl, va, false); // <--- 修复: walk_pte -> vm_getpte
         if (pte_old && (*pte_old & PTE_V) && pte_new && (*pte_new & PTE_V)) {
-            void *pa_old = (void *)PTE2PA(*pte_old);
-            void *pa_new = (void *)PTE2PA(*pte_new);
+            void *pa_old = (void *)PTE_TO_PA(*pte_old); // <--- 修复: PTE2PA -> PTE_TO_PA
+            void *pa_new = (void *)PTE_TO_PA(*pte_new); // <--- 修复: PTE2PA -> PTE_TO_PA
             memmove(pa_new, pa_old, PGSIZE);
         }
     }
@@ -528,19 +570,27 @@ int uvm_copy_pgtbl(proc_t *p_old, proc_t *p_new)
         node_new->next = 0;
 
         // 映射
-        if (uvm_map_pages(p_new->pgtbl, node_new->begin, node_new->npages * PGSIZE, PTE_U | PTE_R | PTE_W | PTE_X) < 0) // 假设 prot
-        {
-            mmap_region_free(node_new);
-            goto fail;
+        // --- 修复: uvm_map_pages -> pmem_alloc + vm_mappages ---
+        uint64 va_end = node_new->begin + node_new->npages * PGSIZE;
+        for (uint64 va = node_new->begin; va < va_end; va += PGSIZE) {
+            void *pa = pmem_alloc(false);
+            if (pa == 0) {
+                mmap_region_free(node_new);
+                goto fail;
+            }
+            
+            // --- 修复: 移除 if 检查 ---
+            // (假设 prot, R W X U)
+            vm_mappages(p_new->pgtbl, va, (uint64)pa, PGSIZE, PTE_U | PTE_R | PTE_W | PTE_X);
         }
 
         // 复制内容
         for (uint64 va = node_new->begin; va < node_new->begin + node_new->npages * PGSIZE; va += PGSIZE) {
-            pte_t *pte_old = walk_pte(p_old->pgtbl, va);
-            pte_t *pte_new = walk_pte(p_new->pgtbl, va);
+            pte_t *pte_old = vm_getpte(p_old->pgtbl, va, false); // <--- 修复: walk_pte -> vm_getpte
+            pte_t *pte_new = vm_getpte(p_new->pgtbl, va, false); // <--- 修复: walk_pte -> vm_getpte
             if (pte_old && (*pte_old & PTE_V) && pte_new && (*pte_new & PTE_V)) {
-                void *pa_old = (void *)PTE2PA(*pte_old);
-                void *pa_new = (void *)PTE2PA(*pte_new);
+                void *pa_old = (void *)PTE_TO_PA(*pte_old); // <--- 修复: PTE2PA -> PTE_TO_PA
+                void *pa_new = (void *)PTE_TO_PA(*pte_new); // <--- 修复: PTE2PA -> PTE_TO_PA
                 memmove(pa_new, pa_old, PGSIZE);
             }
         }
