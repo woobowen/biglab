@@ -66,7 +66,27 @@ void uart_intr(void)
 	{
 		int c = uart_getc_sync();
 		if (c == -1)
-		break;
-		uart_putc_sync(c);
+			break;
+
+		// 将回车与换行统一，且回显为CRLF，便于终端正确换行
+		if (c == '\r' || c == '\n') {
+			uart_putc_sync('\r');
+			uart_putc_sync('\n');
+			continue;
+		}
+
+		// 处理退格键：常见有 '\b'(0x08) 或 DEL(0x7f)
+		if (c == '\b' || c == 0x7f) {
+			// 典型的删除效果：回退一格、输出空格覆盖、再回退一格
+			uart_putc_sync('\b');
+			uart_putc_sync(' ');
+			uart_putc_sync('\b');
+			continue;
+		}
+
+		// 仅回显可打印字符和制表符，其余控制字符忽略
+		if ((c >= 32 && c <= 126) || c == '\t') {
+			uart_putc_sync(c);
+		}
 	}
 }

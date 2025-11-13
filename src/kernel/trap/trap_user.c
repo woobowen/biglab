@@ -1,27 +1,74 @@
-#include "mod.h"
+#include "lib/type.h"
+#include "lib/mod.h"
+#include "lib/method.h"
 
-// in trampoline.S
-extern char trampoline[];  // 内核和用户切换的代码
-extern char user_vector[]; // 用户触发陷阱进入内核
-extern char user_return[]; // 内核处理完毕返回用户
+#include "proc/type.h"
+#include "proc/method.h"
 
-// in trap.S
-extern char kernel_vector[]; // 内核态trap处理流程, 进入内核后应当切换中断处理入口
+#include "mem/type.h"
+#include "mem/method.h"
 
-// in trap_kernel.c
-extern char *interrupt_info[16]; // 中断错误信息
-extern char *exception_info[16]; // 异常错误信息
+#include "syscall/type.h"
+#include "syscall/method.h"
 
-// 在user_vector()里面调用
-// 用户态trap处理的核心逻辑
+#include "lib/print.h"
+
+
+/*
+ * ---------------- trap_user ----------------
+ * * TODO: 
+ * 1. 完成 trap_user_handler
+ * 2. 识别 scause, 分类处理
+ * * NOTE:
+ * 1. scause = 8: 系统调用
+ * a. 调用 syscall()
+ * b. sepc += 4
+ * 2. scause = 13 / 15: page fault
+ * a. 打印调试信息
+ * b. 调用 uvm_ustack_grow()
+ * c. 成功, sepc 不变 (重新执行)
+ * d. 失败, kill_proc()
+ * 3. 其他: 暂不处理, kill_proc()
+ */
+
 void trap_user_handler()
 {
+    proc_t *p = myproc();
+    uint64 scause = r_scause();
+    uint64 sepc = r_sepc();
+    uint64 stval = r_stval();
 
-}
+    w_stvec((uint64)trap_kernel_vector);
+    
+    if (scause == 8) {
+        // System call from User-mode
+        
+        // sepc + 4, 否则会陷入无限循环
+        p->tf->sepc += 4;
+        
+        // 调用系统调用处理函数
+        // a0 寄存器(tf->a0)用于存放返回值
+        p->tf->a0 = syscall();
+        
+    } else if (scause == 13 || scause == 15) {
+        // Page Fault (Load or Store)
+        
+        printf("--- Page Fault: proc %d ---\n", p->pid);
+        printf("scause: %d, sepc: 0x%x, stval: 0x%x\n", scause, sepc, stval);
 
-// 调用user_return()
-// 内核态返回用户态
-void trap_user_return()
-{
-
+        if (uvm_ustack_grow(p, stval) < 0) {
+            // 栈扩展失败, 或 stval 不是合法的栈地址
+            printf("uvm_ustack_grow failed, kill proc\n");
+            kill_proc(p);
+        }
+        
+        // 成功: sepc 不变, 重新执行指令
+        
+    } else {
+        printf("unexpected user trap\n");
+        printf("scause: %d, sepc: 0x%x, stval: 0x%x\n", scause, sepc, stval);
+        kill_proc(p);
+    }
+    
+    trap_user_return();
 }

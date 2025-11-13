@@ -15,6 +15,13 @@
     "git.autofetch": true,
     "scm.alwaysShowRepositories": true,
     "scm.showActions": true,
+
+    // --- 这是我们新加的路径，确保它在这里 ---
+    "C_Cpp.default.includePath": [
+        "${workspaceFolder}/**",
+        "${workspaceFolder}/src/kernel"
+    ],
+
     "C_Cpp.default.compilerPath": "/usr/bin/gcc",
     "files.associations": {
         "mod.h": "c"

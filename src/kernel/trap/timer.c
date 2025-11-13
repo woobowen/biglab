@@ -1,4 +1,8 @@
 #include "mod.h"
+// 寄存器操作等架构相关内联
+#include "../arch/mod.h"
+// 需要锁/printf等（后续timer_create/update可能用到）
+#include "../lib/mod.h"
 
 /*-------------------- 工作在M-mode --------------------*/
 
@@ -45,17 +49,25 @@ static timer_t sys_timer;
 // 时钟创建
 void timer_create()
 {
+    sys_timer.ticks = 0;
+    spinlock_init(&sys_timer.lk, "sys_timer");
 
 }
 
 // 时钟更新
 void timer_update()
 {
-
+    spinlock_acquire(&sys_timer.lk);
+    sys_timer.ticks++;
+    spinlock_release(&sys_timer.lk);
 }
 
 // 获取滴答数量 (不把sys_timer暴露出去, 只提供安全的访问接口)
 uint64 timer_get_ticks()
 {
-
+    uint64 ticks;
+    spinlock_acquire(&sys_timer.lk);
+    ticks = sys_timer.ticks;
+    spinlock_release(&sys_timer.lk);
+    return ticks;
 }

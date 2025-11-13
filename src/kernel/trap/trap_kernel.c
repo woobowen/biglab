@@ -1,7 +1,11 @@
 #include "mod.h"
+// 需要访问寄存器读写内联函数与中断开关工具
+#include "../arch/mod.h"
+// 需要printf/panic/assert/uart_intr等库函数声明
+#include "../lib/mod.h"
 
 // 中断信息
-char *interrupt_info[16] = {
+static char *interrupt_info[16] = {
     "U-mode software interrupt",      // 0
     "S-mode software interrupt",      // 1
     "reserved-1",                     // 2
@@ -21,7 +25,7 @@ char *interrupt_info[16] = {
 };
 
 // 异常信息
-char *exception_info[16] = {
+static char *exception_info[16] = {
     "Instruction address misaligned", // 0
     "Instruction access fault",       // 1
     "Illegal instruction",            // 2
@@ -63,7 +67,10 @@ void trap_kernel_inithart()
     // 填写内核态中断处理函数
     w_stvec((uint64)kernel_vector);
 
-    // 打开中断
+    // 使能S态三类中断的分开关：外设/时钟/软件
+    w_sie(r_sie() | SIE_SEIE | SIE_STIE | SIE_SSIE);
+
+    // 打开中断总开关
     intr_on();
 }
 
@@ -87,7 +94,12 @@ void trap_kernel_handler()
         // 1-中断处理
         switch (trap_id) // 中断产生原因分类
         {
-
+        case 1: // S-mode software interrupt（由M态时钟中断转发）
+            timer_interrupt_handler();
+            break;
+        case 9: // S-mode external interrupt（PLIC）
+            external_interrupt_handler();
+            break;
         default: // 例外处理
             printf("\nunexpected interrupt: %s\n", interrupt_info[trap_id]);
             printf("trap_id = %d, sepc = %p, stval = %p\n", trap_id, sepc, stval);
@@ -109,7 +121,14 @@ void trap_kernel_handler()
 // 外设中断处理 (基于PLIC，lab-3只需要识别和处理UART中断)
 void external_interrupt_handler()
 {
-
+    int irq = plic_claim();
+    if (irq == UART_IRQ) {
+        uart_intr();  // 串口中断回显
+    } else if (irq > 0) {
+        printf("unexpected PLIC irq=%d\n", irq);
+    }
+    if (irq > 0)
+        plic_complete(irq);
 }
 
 // 时钟中断处理 (基于CLINT)
@@ -119,6 +138,11 @@ void timer_interrupt_handler()
     // 所以只需要指定一个CPU(CPU-0)负责更新时钟
     if(mycpuid() == 0)
         timer_update();
+    // 打印tick信息
+    uint64 ticks = timer_get_ticks();
+    if (ticks % 100 == 0) {
+        printf("tick=%d\n", (int)ticks);
+   }
     // 清除 SSIP bit (S-mode software interrupt pending)
     // 宣布 S-mode 软件中断处理完成
     // 在 trap.S 里面有对应的两条命令, 去找找
