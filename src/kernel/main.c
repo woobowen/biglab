@@ -20,9 +20,9 @@ int main()
         kvm_inithart();
         trap_kernel_init();
         trap_kernel_inithart();
-        proc_make_first();
         __sync_synchronize();
         started = 1;
+        proc_make_first();
     } else {
 
         while (started == 0)
